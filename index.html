@@ -479,7 +479,7 @@ Plotly.newPlot('chart', data, {margin:{l:10,r:10,t:30,b:10}}, {responsive:true, 
       }
 
       const url = `https://www.fbs.com.tw/MKT/Index?name=%EF%BC%AB%E7%B7%9A%E5%9C%96&stock=${encodeURIComponent(code)}`;
-      window.open(url, '_blank', 'noopener,noreferrer');
+      window.location.href = url;
 
       return false; // ★阻止 Plotly 預設 zoom（避免點到底層變空白）
     });
@@ -662,4 +662,5 @@ showDataUpdatedAt();
 </script>
 </body>
 </html>
+
 
