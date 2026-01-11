@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>股票熱力圖（可上傳 / 可分享）</title>
+
+  <!-- Plotly Treemap -->
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  <!-- CSV parser -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <!-- Excel parser -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- URL-friendly compression -->
+  <script src="https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js"></script>
+
+  <style>
+    :root { --border:#e5e7eb; --muted:#6b7280; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", sans-serif; }
+    header { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+    h1 { margin: 0; font-size: 18px; }
+    .muted { color: var(--muted); font-size: 13px; margin-top: 6px; line-height: 1.5; }
+    .bar { display:flex; gap:10px; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid var(--border); align-items: center; }
+    button { padding: 8px 10px; border: 1px solid var(--border); background: #fff; border-radius: 10px; cursor:pointer; }
+    button:hover { background:#f9fafb; }
+    input[type="file"] { padding: 6px 0; }
+    input[type="text"], select {
+      padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px;
+      min-width: 220px; background:#fff;
+    }
+    #msg { padding: 0 16px 10px; color: #b91c1c; font-size: 13px; min-height: 18px; white-space: pre-wrap; }
+    #chart { height: calc(100vh - 200px); }
+    .ok { color: #047857 !important; }
+    .drop {
+      margin: 10px 16px 0;
+      border: 2px dashed var(--border);
+      border-radius: 14px;
+      padding: 10px 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .pill { font-size:12px; padding:3px 8px; border:1px solid var(--border); border-radius:999px; color:var(--muted); }
+    .timebar { margin-top: 8px; display:flex; gap:8px; flex-wrap: wrap; align-items:center; }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>股票熱力圖（上傳資料 → 產生分享連結）</h1>
+    <div class="muted">
+      預設會嘗試讀取同資料夾的 <b>data.csv</b>。可拖拉/選檔上傳 CSV/XLSX/JSON。
+      「產生分享連結」會把資料壓縮後放進網址 <b>#hash</b>（適合小中型資料集）。
+      <span class="pill">提示：太多檔（例如上千檔）URL 可能過長，建議改用「從網址載入 CSV」</span>
+      <div class="timebar">
+        <span id="clockNow" class="pill">現在時間：--</span>
+        <span id="dataUpdated" class="pill">資料更新：--</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="bar">
+    <input id="file" type="file" accept=".csv,.xlsx,.xls,.json" />
+    <button id="btnLoadDefault">載入（或重載）data.csv</button>
+
+    <label class="muted" style="margin-left:4px;">期間：</label>
+    <select id="horizon">
+      <option value="1d" selected>近1日</option>
+      <option value="5d">近5日</option>
+      <option value="20d">近20日</option>
+      <option value="60d">近60日</option>
+      <option value="1y">近一年</option>
+      <option value="ytd">YTD</option>
+    </select>
+
+    <label class="muted" style="margin-left:4px;">顯示模式：</label>
+    <select id="mode">
+      <option value="none">單層：類股 → 股票</option>
+      <option value="subcol">雙層：類股 → 子分類欄位 → 股票</option>
+      <option value="amountbin">雙層：類股 → 成交額分級（大/中/小）→ 股票</option>
+    </select>
+
+    <button id="btnShare">產生分享連結</button>
+    <button id="btnCopy" disabled>複製分享連結</button>
+
+    <span class="muted">或從網址載入 CSV：</span>
+    <input id="csvUrl" type="text" placeholder="貼上 data.csv 的公開網址（raw）" />
+    <button id="btnLoadUrl">從網址載入</button>
+  </div>
+
+  <div class="drop">📥 你也可以把檔案直接拖曳到這個頁面任何位置放開（CSV / XLSX / JSON）。</div>
+  <div id="msg"></div>
+  <div id="chart"></div>
+
+<script>
+  const $msg = document.getElementById('msg');
+  const $file = document.getElementById('file');
+  const $btnLoadDefault = document.getElementById('btnLoadDefault');
+  const $btnShare = document.getElementById('btnShare');
+  const $btnCopy = document.getElementById('btnCopy');
+  const $csvUrl = document.getElementById('csvUrl');
+  const $btnLoadUrl = document.getElementById('btnLoadUrl');
+  const $mode = document.getElementById('mode');
+  const $horizon = document.getElementById('horizon');
+
+  let lastRawRows = null;  // 原始 rows
+  let lastRows = null;     // normalized rows
+  let lastMode = 'none';
+  let lastHorizon = '1d';
+
+  function setMsg(text, ok=false) {
+    $msg.textContent = text || '';
+    $msg.className = ok ? 'ok' : '';
+  }
+
+  window.addEventListener('error', (e) => setMsg('⚠️ JS 錯誤：' + (e?.message || e), false));
+  window.addEventListener('unhandledrejection', (e) => setMsg('⚠️ Promise 錯誤：' + (e?.reason?.message || e?.reason || e), false));
+
+  // ===== 時間顯示 =====
+  function startClockNow() {
+    const el = document.getElementById('clockNow');
+    if (!el) return;
+
+    const fmt = new Intl.DateTimeFormat('zh-Hant-TW', {
+      year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', second:'2-digit',
+      hour12:false,
+      timeZone:'Asia/Taipei'
+    });
+
+    const tick = () => { el.textContent = `現在時間：${fmt.format(new Date())}`; };
+    tick();
+    setInterval(tick, 1000);
+  }
+
+  async function showDataUpdatedAt() {
+    const el = document.getElementById('dataUpdated');
+    if (!el) return;
+
+    // 你原本寫死的 repo 資訊（需要換 repo 記得改）
+    const owner = "twfcinv-svg";
+    const repo  = "stock-heatmap1229";
+    const path  = "data.csv";
+
+    try {
+      const api = `https://api.github.com/repos/${owner}/${repo}/commits?path=${encodeURIComponent(path)}&per_page=1`;
+      const res = await fetch(api, { headers: { 'Accept': 'application/vnd.github+json' }, cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const arr = await res.json();
+
+      const iso = arr?.[0]?.commit?.committer?.date || arr?.[0]?.commit?.author?.date;
+      if (!iso) throw new Error('找不到 commit 時間');
+
+      const d = new Date(iso);
+      el.textContent = `資料更新：${d.toLocaleString('zh-Hant-TW', { timeZone:'Asia/Taipei', hour12:false })}`;
+    } catch (e) {
+      el.textContent = `資料更新：讀取失敗`;
+    }
+  }
+  // ===================
+
+  function horizonLabel(h) {
+    const map = { '1d':'近1日', '5d':'近5日', '20d':'近20日', '60d':'近60日', '1y':'近一年', 'ytd':'YTD' };
+    return map[h] || h;
+  }
+
+  function toNumber(x) {
+    if (x === null || x === undefined) return NaN;
+    if (typeof x === 'number') return x;
+    const s = String(x)
+      .trim()
+      .replace(/,/g,'')
+      .replace(/％/g,'%')
+      .replace(/%/g,'');
+    const n = Number(s);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  // ★顯示在 symbol 底下的漲跌幅格式（1 位小數）
+  function fmtPct(x, digits=1) {
+    const n = Number(x);
+    if (!Number.isFinite(n)) return '';
+    const sign = n > 0 ? '+' : '';
+    return `${sign}${n.toFixed(digits)}%`;
+  }
+
+  function pickColumn(headers, candidates) {
+    const lower = headers.map(h => String(h).trim().toLowerCase());
+    for (const c of candidates) {
+      const idx = lower.indexOf(String(c).toLowerCase());
+      if (idx >= 0) return headers[idx];
+    }
+    return null;
+  }
+
+  function quantiles(values) {
+    const xs = values.filter(Number.isFinite).slice().sort((a,b)=>a-b);
+    if (xs.length === 0) return {q1:0, q2:0};
+    const q = (p) => {
+      const idx = (xs.length - 1) * p;
+      const lo = Math.floor(idx), hi = Math.ceil(idx);
+      if (lo === hi) return xs[lo];
+      const t = idx - lo;
+      return xs[lo] * (1 - t) + xs[hi] * t;
+    };
+    return {q1: q(0.33), q2: q(0.66)};
+  }
+
+  function amountBucket(v, q1, q2) {
+    if (!Number.isFinite(v)) return '未知';
+    if (v >= q2) return '大';
+    if (v >= q1) return '中';
+    return '小';
+  }
+
+  // ★顏色（報酬）欄位候選：依期間
+  function changeCandidatesByHorizon(h) {
+    const common = ['change','chg','return','pct','perf','漲跌','漲跌幅','報酬','報酬率','變動'];
+    const map = {
+      '1d':  ['chg_1d','change_1d','ret_1d','r1d','1d','近1日','1日','一日', ...common],
+      '5d':  ['chg_5d','change_5d','ret_5d','r5d','5d','近5日','5日','五日', ...common],
+      '20d': ['chg_20d','change_20d','ret_20d','r20d','20d','近20日','20日','二十日','月', ...common],
+      '60d': ['chg_60d','change_60d','ret_60d','r60d','60d','近60日','60日','三月', ...common],
+      '1y':  ['chg_1y','change_1y','ret_1y','r1y','1y','1yr','近一年','1年','一年', ...common],
+      'ytd': ['ytd','chg_ytd','change_ytd','ret_ytd','今年以來','年初至今', ...common]
+    };
+    return map[h] || map['1d'];
+  }
+
+  // ★面積（量）欄位候選：依期間
+  function valueCandidatesByHorizon(h) {
+    const map = {
+      '1d':  ['amt_1d','amount_1d','turnover_1d','value_1d','vol_1d','近1日成交額','1日成交額','1日均量'],
+      '5d':  ['amt_5d','amount_5d','turnover_5d','value_5d','vol_5d','近5日成交額','5日成交額','5日均量'],
+      '20d': ['amt_20d','amount_20d','turnover_20d','value_20d','vol_20d','近20日成交額','20日成交額','20日均量'],
+      '60d': ['amt_60d','amount_60d','turnover_60d','value_60d','vol_60d','近60日成交額','60日成交額','60日均量'],
+      '1y':  ['amt_1y','amount_1y','turnover_1y','value_1y','vol_1y','近一年成交額','1年成交額','一年成交額'],
+      'ytd': ['amt_ytd','amount_ytd','turnover_ytd','value_ytd','vol_ytd','ytd_amount','今年以來成交額','年初至今成交額']
+    };
+    return map[h] || map['1d'];
+  }
+
+  function normalizeRows(rawRows, mode, horizon) {
+    if (!Array.isArray(rawRows) || rawRows.length === 0) throw new Error('沒有讀到任何資料列。');
+
+    const headers = Object.keys(rawRows[0] || {});
+    if (headers.length === 0) throw new Error('找不到欄位（header）。');
+
+    const colGroup  = pickColumn(headers, ['group','sector','industry','分類','產業','類別','類股']);
+    const colSub    = pickColumn(headers, ['sub','subgroup','sub_group','subsector','sub_sector','子分類','子產業','次分類','次產業','細分','細項']);
+    const colSymbol = pickColumn(headers, ['symbol','ticker','code','代碼','股票','stock','name','名稱']);
+
+    // ★依期間挑「量」當面積（必要）
+    const colValue  = pickColumn(headers, valueCandidatesByHorizon(horizon));
+    if (!colValue) {
+      throw new Error(
+        `找不到「${horizonLabel(horizon)}」對應的量(面積)欄位。\n` +
+        `請提供其中一個欄位：\n${valueCandidatesByHorizon(horizon).join(' / ')}`
+      );
+    }
+
+    // ★依期間挑「報酬」當顏色（必要）
+    const colChange = pickColumn(headers, changeCandidatesByHorizon(horizon));
+
+    if (!colSymbol) throw new Error('找不到「symbol」欄位（可接受：symbol/ticker/code/代碼/股票/名稱）。');
+    if (!colChange) {
+      throw new Error(
+        `找不到「${horizonLabel(horizon)}」對應的變動(顏色)欄位。\n` +
+        `請提供其中一個欄位：\n${changeCandidatesByHorizon(horizon).join(' / ')}`
+      );
+    }
+
+    // 先轉成基本結構（sub 後續依 mode 決定）
+    let rows = rawRows.map((r) => {
+      const group = colGroup ? String(r[colGroup] ?? '未分類').trim() : '未分類';
+      const symbol = String(r[colSymbol] ?? '').trim();
+      const value = toNumber(r[colValue]);
+      const change = toNumber(r[colChange]);
+      if (!symbol) return null;
+      return {
+        group,
+        sub: '',
+        symbol,
+        value: Number.isFinite(value) && value > 0 ? value : 1,
+        change: Number.isFinite(change) ? change : 0
+      };
+    }).filter(Boolean);
+
+    if (rows.length === 0) throw new Error('資料列解析後為空（可能 symbol 欄位都是空的）。');
+
+    if (mode === 'subcol') {
+      if (!colSub) throw new Error('你選了「子分類欄位」模式，但資料找不到子分類欄位（可接受：sub/subgroup/子分類/子產業/次分類…）。');
+      rows = rawRows.map((r) => {
+        const group = colGroup ? String(r[colGroup] ?? '未分類').trim() : '未分類';
+        const symbol = String(r[colSymbol] ?? '').trim();
+        const value = toNumber(r[colValue]);
+        const change = toNumber(r[colChange]);
+        const sub = String(r[colSub] ?? '未分類').trim() || '未分類';
+        if (!symbol) return null;
+        return {
+          group,
+          sub,
+          symbol,
+          value: Number.isFinite(value) && value > 0 ? value : 1,
+          change: Number.isFinite(change) ? change : 0
+        };
+      }).filter(Boolean);
+
+      if (rows.length === 0) throw new Error('資料列解析後為空（可能 symbol 欄位都是空的）。');
+      return rows;
+    }
+
+    if (mode === 'amountbin') {
+      const byGroup = new Map();
+      for (const r of rows) {
+        if (!byGroup.has(r.group)) byGroup.set(r.group, []);
+        byGroup.get(r.group).push(r.value);
+      }
+      const qMap = new Map();
+      for (const [g, vs] of byGroup.entries()) qMap.set(g, quantiles(vs));
+      rows = rows.map(r => {
+        const {q1, q2} = qMap.get(r.group) || {q1:0,q2:0};
+        return {...r, sub: `成交額${amountBucket(r.value, q1, q2)}`};
+      });
+      return rows;
+    }
+
+    return rows;
+  }
+
+  function buildTreemap(rows, mode) {
+    const ids = [], labels = [], parents = [], values = [], colors = [];
+    const ROOT_ID = 'root';
+
+    ids.push(ROOT_ID);
+    labels.push('全部');
+    parents.push('');
+    values.push(0);
+    colors.push(0);
+
+    const groupAgg = new Map();
+    const subAgg = new Map();
+
+    for (const r of rows) {
+      if (!groupAgg.has(r.group)) groupAgg.set(r.group, {value:0, wchg:0});
+      const g = groupAgg.get(r.group);
+      g.value += r.value;
+      g.wchg += r.change * r.value;
+
+      if (mode !== 'none') {
+        const key = `${r.group}||${r.sub || '未分類'}`;
+        if (!subAgg.has(key)) subAgg.set(key, {value:0, wchg:0, group:r.group, sub:(r.sub || '未分類')});
+        const s = subAgg.get(key);
+        s.value += r.value;
+        s.wchg += r.change * r.value;
+      }
+    }
+
+    for (const [gname, g] of groupAgg.entries()) {
+      const gid = `g|${gname}`;
+      ids.push(gid);
+      labels.push(gname);
+      parents.push(ROOT_ID);
+      values.push(g.value);
+      colors.push(g.value ? (g.wchg / g.value) : 0);
+    }
+
+    if (mode !== 'none') {
+      for (const s of subAgg.values()) {
+        const sid = `s|${s.group}|${s.sub}`;
+        ids.push(sid);
+        labels.push(s.sub);
+        parents.push(`g|${s.group}`);
+        values.push(s.value);
+        colors.push(s.value ? (s.wchg / s.value) : 0);
+      }
+    }
+
+    for (const r of rows) {
+      const parentId = (mode === 'none')
+        ? `g|${r.group}`
+        : `s|${r.group}|${r.sub || '未分類'}`;
+
+      const lid = `l|${r.group}|${r.sub || ''}|${r.symbol}`;
+      ids.push(lid);
+
+      // ★葉節點 label = symbol + 換行 + 漲跌幅（1位小數）
+      labels.push(`${r.symbol}<br>${fmtPct(r.change)}`);
+
+      parents.push(parentId);
+      values.push(r.value);
+      colors.push(r.change);
+    }
+
+    values[0] = Array.from(groupAgg.values()).reduce((s,x)=>s+x.value,0);
+    return {ids, labels, parents, values, colors};
+  }
+
+  function render(rawRows) {
+    const mode = $mode.value;
+    const horizon = $horizon.value;
+
+    lastMode = mode;
+    lastHorizon = horizon;
+
+    const rows = normalizeRows(rawRows, mode, horizon);
+    lastRows = rows;
+
+    const {ids, labels, parents, values, colors} = buildTreemap(rows, mode);
+
+    const data = [{
+      type: 'treemap',
+      ids,
+      labels,
+      parents,
+      values,
+      branchvalues: 'total',
+      textinfo: 'label',
+      marker: {
+        colors,
+        colorscale: [
+          [0,'#1a9641'],
+          [0.5,'#f3f4f6'],
+          [1,'#d7191c']
+        ],
+        cmid: 0,
+        line: { width: 1, color: '#d1d5db' }
+      },
+      hovertemplate:
+        `<b>%{label}</b><br>` +
+        `上層：%{parent}<br>` +
+        `量（${horizonLabel(horizon)}）：%{value}<br>` +
+        `變動（${horizonLabel(horizon)}）：%{color:.2f}<extra></extra>`
+    }];
+
+    Plotly.newPlot('chart', data, {margin:{l:10,r:10,t:10,b:10}}, {responsive:true, displaylogo:false});
+    setMsg(`已更新熱力圖（期間：${horizonLabel(horizon)}；模式：${mode}）。`, true);
+    $btnCopy.disabled = true;
+
+    showDataUpdatedAt();
+  }
+
+  function loadCSVText(text) {
+    const parsed = Papa.parse(text, {header: true, skipEmptyLines: true});
+    if (parsed.errors && parsed.errors.length) {
+      throw new Error('CSV 解析錯誤：' + parsed.errors[0].message);
+    }
+    return parsed.data;
+  }
+
+  async function handleFile(file) {
+    setMsg('');
+    const name = (file.name || '').toLowerCase();
+    const buf = await file.arrayBuffer();
+
+    if (name.endsWith('.csv')) {
+      const text = new TextDecoder('utf-8').decode(buf);
+      lastRawRows = loadCSVText(text);
+      render(lastRawRows);
+      return;
+    }
+    if (name.endsWith('.json')) {
+      const text = new TextDecoder('utf-8').decode(buf);
+      const raw = JSON.parse(text);
+      lastRawRows = Array.isArray(raw) ? raw : (raw.rows || raw.data || []);
+      render(lastRawRows);
+      return;
+    }
+    if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
+      const wb = XLSX.read(buf, {type: 'array'});
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      lastRawRows = XLSX.utils.sheet_to_json(sheet, {defval: ''});
+      render(lastRawRows);
+      return;
+    }
+    throw new Error('不支援的檔案格式。請用 CSV / XLSX / JSON。');
+  }
+
+  function makeShareLink(mode, horizon, rawRows) {
+    const payload = {v: 5, mode, horizon, rawRows};
+    const json = JSON.stringify(payload);
+    const compressed = LZString.compressToEncodedURIComponent(json);
+    return `${location.origin}${location.pathname}#data=${compressed}`;
+  }
+
+  function tryLoadFromHash() {
+    const hash = location.hash || '';
+    if (!hash.startsWith('#data=')) return false;
+    try {
+      const encoded = hash.slice(6);
+      const json = LZString.decompressFromEncodedURIComponent(encoded);
+      const payload = JSON.parse(json);
+
+      if (payload?.mode) $mode.value = payload.mode;
+      if (payload?.horizon) $horizon.value = payload.horizon;
+
+      if (payload?.rawRows && Array.isArray(payload.rawRows)) {
+        lastRawRows = payload.rawRows;
+        render(lastRawRows);
+        setMsg('已從分享連結載入資料。', true);
+        return true;
+      }
+      if (payload?.rows && Array.isArray(payload.rows)) {
+        lastRawRows = payload.rows;
+        render(lastRawRows);
+        setMsg('已從分享連結載入資料（舊格式相容）。', true);
+        return true;
+      }
+
+      throw new Error('hash 內容不正確');
+    } catch (e) {
+      setMsg('分享連結解析失敗：' + (e?.message || e));
+      return false;
+    }
+  }
+
+  async function loadFromUrl(url) {
+    setMsg('');
+    if (!url) throw new Error('請貼上 CSV 的公開網址。');
+    const res = await fetch(url, {cache: 'no-store'});
+    if (!res.ok) throw new Error(`抓取失敗：HTTP ${res.status}`);
+    const text = await res.text();
+    lastRawRows = loadCSVText(text);
+    render(lastRawRows);
+  }
+
+  async function loadDefaultCSV() {
+    try {
+      const res = await fetch('./data.csv', {cache: 'no-store'});
+      if (!res.ok) throw new Error(`抓取 data.csv 失敗：HTTP ${res.status}`);
+      const text = await res.text();
+      lastRawRows = loadCSVText(text);
+      render(lastRawRows);
+      setMsg('已載入 data.csv。', true);
+    } catch (e) {
+      setMsg('載入 data.csv 失敗（本機 file:// 常見限制，部署到 Pages 就正常）：' + (e?.message || e));
+    }
+  }
+
+  // events
+  $file.addEventListener('change', async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    try { await handleFile(f); }
+    catch (err) { setMsg(err?.message || String(err)); }
+  });
+
+  window.addEventListener('dragover', (e) => { e.preventDefault(); });
+  window.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    const f = e.dataTransfer?.files?.[0];
+    if (!f) return;
+    try { await handleFile(f); }
+    catch (err) { setMsg(err?.message || String(err)); }
+  });
+
+  $btnLoadDefault.addEventListener('click', loadDefaultCSV);
+
+  $mode.addEventListener('change', () => {
+    try {
+      if (!lastRawRows) { setMsg('已切換顯示模式。請先載入 data.csv 或上傳檔案。', true); return; }
+      render(lastRawRows);
+    } catch (e) {
+      setMsg(e?.message || String(e));
+    }
+  });
+
+  $horizon.addEventListener('change', () => {
+    try {
+      if (!lastRawRows) { setMsg('已切換期間。請先載入 data.csv 或上傳檔案。', true); return; }
+      render(lastRawRows);
+    } catch (e) {
+      setMsg(e?.message || String(e));
+    }
+  });
+
+  $btnShare.addEventListener('click', () => {
+    try {
+      if (!lastRawRows) throw new Error('請先上傳資料或成功載入 data.csv。');
+      const url = makeShareLink($mode.value, $horizon.value, lastRawRows);
+      location.hash = url.split('#')[1];
+      setMsg('已產生分享連結（資料已寫入網址 #hash）。可按「複製分享連結」。', true);
+      $btnCopy.disabled = false;
+    } catch (err) {
+      setMsg(err?.message || String(err));
+    }
+  });
+
+  $btnCopy.addEventListener('click', async () => {
+    try {
+      const url = `${location.origin}${location.pathname}${location.hash}`;
+      await navigator.clipboard.writeText(url);
+      setMsg('已複製到剪貼簿。', true);
+    } catch (err) {
+      setMsg('複製失敗：你可以直接手動複製網址列。');
+    }
+  });
+
+  $btnLoadUrl.addEventListener('click', async () => {
+    try { await loadFromUrl($csvUrl.value.trim()); }
+    catch (err) { setMsg(err?.message || String(err)); }
+  });
+
+  // boot
+  startClockNow();
+  showDataUpdatedAt();
+
+  if (!tryLoadFromHash()) {
+    loadDefaultCSV();
+  }
+</script>
+</body>
+</html>
