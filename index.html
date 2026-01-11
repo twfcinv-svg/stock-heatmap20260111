@@ -239,161 +239,183 @@
     return map[h] || map['1d'];
   }
 
-  function normalizeRows(rawRows, mode, horizon) {
-    if (!Array.isArray(rawRows) || rawRows.length === 0) throw new Error('沒有讀到任何資料列。');
+function normalizeRows(rawRows, mode, horizon) {
+  if (!Array.isArray(rawRows) || rawRows.length === 0) throw new Error('沒有讀到任何資料列。');
 
-    const headers = Object.keys(rawRows[0] || {});
-    if (headers.length === 0) throw new Error('找不到欄位（header）。');
+  const headers = Object.keys(rawRows[0] || {});
+  if (headers.length === 0) throw new Error('找不到欄位（header）。');
 
-    const colGroup  = pickColumn(headers, ['group','sector','industry','分類','產業','類別','類股']);
-    const colSub    = pickColumn(headers, ['sub','subgroup','sub_group','subsector','sub_sector','子分類','子產業','次分類','次產業','細分','細項']);
-    const colSymbol = pickColumn(headers, ['symbol','ticker','code','代碼','股票','stock','name','名稱']);
+  const colGroup  = pickColumn(headers, ['group','sector','industry','分類','產業','類別','類股']);
+  const colSub    = pickColumn(headers, ['sub','subgroup','sub_group','subsector','sub_sector','子分類','子產業','次分類','次產業','細分','細項']);
+  const colSymbol = pickColumn(headers, ['symbol','name','名稱','股票']); // 顯示用
 
-    // ★依期間挑「量」當面積（必要）
-    const colValue  = pickColumn(headers, valueCandidatesByHorizon(horizon));
-    if (!colValue) {
-      throw new Error(
-        `找不到「${horizonLabel(horizon)}」對應的量(面積)欄位。\n` +
-        `請提供其中一個欄位：\n${valueCandidatesByHorizon(horizon).join(' / ')}`
-      );
-    }
+  // ★新增：專門拿來組網址的股票代碼欄位（優先 stock_code/股票代碼）
+  const colCode   = pickColumn(headers, ['stock_code','stockcode','stockCode','股票代碼','證券代碼','代碼','code','ticker']);
 
-    // ★依期間挑「報酬」當顏色（必要）
-    const colChange = pickColumn(headers, changeCandidatesByHorizon(horizon));
+  // ★依期間挑「量」當面積（必要）
+  const colValue  = pickColumn(headers, valueCandidatesByHorizon(horizon));
+  if (!colValue) {
+    throw new Error(
+      `找不到「${horizonLabel(horizon)}」對應的量(面積)欄位。\n` +
+      `請提供其中一個欄位：\n${valueCandidatesByHorizon(horizon).join(' / ')}`
+    );
+  }
 
-    if (!colSymbol) throw new Error('找不到「symbol」欄位（可接受：symbol/ticker/code/代碼/股票/名稱）。');
-    if (!colChange) {
-      throw new Error(
-        `找不到「${horizonLabel(horizon)}」對應的變動(顏色)欄位。\n` +
-        `請提供其中一個欄位：\n${changeCandidatesByHorizon(horizon).join(' / ')}`
-      );
-    }
+  // ★依期間挑「報酬」當顏色（必要）
+  const colChange = pickColumn(headers, changeCandidatesByHorizon(horizon));
+  if (!colChange) {
+    throw new Error(
+      `找不到「${horizonLabel(horizon)}」對應的變動(顏色)欄位。\n` +
+      `請提供其中一個欄位：\n${changeCandidatesByHorizon(horizon).join(' / ')}`
+    );
+  }
 
-    // 先轉成基本結構（sub 後續依 mode 決定）
-    let rows = rawRows.map((r) => {
-      const group = colGroup ? String(r[colGroup] ?? '未分類').trim() : '未分類';
+  if (!colSymbol) throw new Error('找不到「symbol」顯示欄位（可接受：symbol/name/名稱/股票）。');
+  if (!colCode) throw new Error('找不到「stock_code」股票代碼欄位（建議欄位名：stock_code 或 股票代碼）。');
+
+  // 先轉成基本結構（sub 後續依 mode 決定）
+  let rows = rawRows.map((r) => {
+    const group  = colGroup ? String(r[colGroup] ?? '未分類').trim() : '未分類';
+    const symbol = String(r[colSymbol] ?? '').trim();
+    const code   = String(r[colCode] ?? '').trim(); // ★網址用代碼
+    const value  = toNumber(r[colValue]);
+    const change = toNumber(r[colChange]);
+
+    if (!symbol) return null;
+    if (!code) return null;
+
+    return {
+      group,
+      sub: '',
+      symbol,
+      code, // ★新增
+      value: Number.isFinite(value) && value > 0 ? value : 1,
+      change: Number.isFinite(change) ? change : 0
+    };
+  }).filter(Boolean);
+
+  if (rows.length === 0) throw new Error('資料列解析後為空（可能 symbol/stock_code 欄位有空值）。');
+
+  if (mode === 'subcol') {
+    if (!colSub) throw new Error('你選了「子分類欄位」模式，但資料找不到子分類欄位（sub/子分類/次分類…）。');
+
+    rows = rawRows.map((r) => {
+      const group  = colGroup ? String(r[colGroup] ?? '未分類').trim() : '未分類';
       const symbol = String(r[colSymbol] ?? '').trim();
-      const value = toNumber(r[colValue]);
+      const code   = String(r[colCode] ?? '').trim();
+      const value  = toNumber(r[colValue]);
       const change = toNumber(r[colChange]);
+      const sub    = String(r[colSub] ?? '未分類').trim() || '未分類';
+
       if (!symbol) return null;
+      if (!code) return null;
+
       return {
         group,
-        sub: '',
+        sub,
         symbol,
+        code, // ★新增
         value: Number.isFinite(value) && value > 0 ? value : 1,
         change: Number.isFinite(change) ? change : 0
       };
     }).filter(Boolean);
 
-    if (rows.length === 0) throw new Error('資料列解析後為空（可能 symbol 欄位都是空的）。');
-
-    if (mode === 'subcol') {
-      if (!colSub) throw new Error('你選了「子分類欄位」模式，但資料找不到子分類欄位（可接受：sub/subgroup/子分類/子產業/次分類…）。');
-      rows = rawRows.map((r) => {
-        const group = colGroup ? String(r[colGroup] ?? '未分類').trim() : '未分類';
-        const symbol = String(r[colSymbol] ?? '').trim();
-        const value = toNumber(r[colValue]);
-        const change = toNumber(r[colChange]);
-        const sub = String(r[colSub] ?? '未分類').trim() || '未分類';
-        if (!symbol) return null;
-        return {
-          group,
-          sub,
-          symbol,
-          value: Number.isFinite(value) && value > 0 ? value : 1,
-          change: Number.isFinite(change) ? change : 0
-        };
-      }).filter(Boolean);
-
-      if (rows.length === 0) throw new Error('資料列解析後為空（可能 symbol 欄位都是空的）。');
-      return rows;
-    }
-
-    if (mode === 'amountbin') {
-      const byGroup = new Map();
-      for (const r of rows) {
-        if (!byGroup.has(r.group)) byGroup.set(r.group, []);
-        byGroup.get(r.group).push(r.value);
-      }
-      const qMap = new Map();
-      for (const [g, vs] of byGroup.entries()) qMap.set(g, quantiles(vs));
-      rows = rows.map(r => {
-        const {q1, q2} = qMap.get(r.group) || {q1:0,q2:0};
-        return {...r, sub: `成交額${amountBucket(r.value, q1, q2)}`};
-      });
-      return rows;
-    }
-
+    if (rows.length === 0) throw new Error('資料列解析後為空（可能 symbol/stock_code 欄位有空值）。');
     return rows;
   }
 
-  function buildTreemap(rows, mode) {
-    const ids = [], labels = [], parents = [], values = [], colors = [];
-    const ROOT_ID = 'root';
-
-    ids.push(ROOT_ID);
-    labels.push('全部');
-    parents.push('');
-    values.push(0);
-    colors.push(0);
-
-    const groupAgg = new Map();
-    const subAgg = new Map();
-
+  if (mode === 'amountbin') {
+    const byGroup = new Map();
     for (const r of rows) {
-      if (!groupAgg.has(r.group)) groupAgg.set(r.group, {value:0, wchg:0});
-      const g = groupAgg.get(r.group);
-      g.value += r.value;
-      g.wchg += r.change * r.value;
-
-      if (mode !== 'none') {
-        const key = `${r.group}||${r.sub || '未分類'}`;
-        if (!subAgg.has(key)) subAgg.set(key, {value:0, wchg:0, group:r.group, sub:(r.sub || '未分類')});
-        const s = subAgg.get(key);
-        s.value += r.value;
-        s.wchg += r.change * r.value;
-      }
+      if (!byGroup.has(r.group)) byGroup.set(r.group, []);
+      byGroup.get(r.group).push(r.value);
     }
+    const qMap = new Map();
+    for (const [g, vs] of byGroup.entries()) qMap.set(g, quantiles(vs));
+    rows = rows.map(r => {
+      const {q1, q2} = qMap.get(r.group) || {q1:0,q2:0};
+      return {...r, sub: `成交額${amountBucket(r.value, q1, q2)}`};
+    });
+    return rows;
+  }
 
-    for (const [gname, g] of groupAgg.entries()) {
-      const gid = `g|${gname}`;
-      ids.push(gid);
-      labels.push(gname);
-      parents.push(ROOT_ID);
-      values.push(g.value);
-      colors.push(g.value ? (g.wchg / g.value) : 0);
-    }
+  return rows;
+}
+
+
+ function buildTreemap(rows, mode) {
+  const ids = [], labels = [], parents = [], values = [], colors = [], customdata = [];
+  const ROOT_ID = 'root';
+
+  ids.push(ROOT_ID);
+  labels.push('全部');
+  parents.push('');
+  values.push(0);
+  colors.push(0);
+  customdata.push(null);
+
+  const groupAgg = new Map();
+  const subAgg = new Map();
+
+  for (const r of rows) {
+    if (!groupAgg.has(r.group)) groupAgg.set(r.group, {value:0, wchg:0});
+    const g = groupAgg.get(r.group);
+    g.value += r.value;
+    g.wchg += r.change * r.value;
 
     if (mode !== 'none') {
-      for (const s of subAgg.values()) {
-        const sid = `s|${s.group}|${s.sub}`;
-        ids.push(sid);
-        labels.push(s.sub);
-        parents.push(`g|${s.group}`);
-        values.push(s.value);
-        colors.push(s.value ? (s.wchg / s.value) : 0);
-      }
+      const key = `${r.group}||${r.sub || '未分類'}`;
+      if (!subAgg.has(key)) subAgg.set(key, {value:0, wchg:0, group:r.group, sub:(r.sub || '未分類')});
+      const s = subAgg.get(key);
+      s.value += r.value;
+      s.wchg += r.change * r.value;
     }
-
-    for (const r of rows) {
-      const parentId = (mode === 'none')
-        ? `g|${r.group}`
-        : `s|${r.group}|${r.sub || '未分類'}`;
-
-      const lid = `l|${r.group}|${r.sub || ''}|${r.symbol}`;
-      ids.push(lid);
-
-      // ★葉節點 label = symbol + 換行 + 漲跌幅（1位小數）
-      labels.push(`${r.symbol}<br>${fmtPct(r.change)}`);
-
-      parents.push(parentId);
-      values.push(r.value);
-      colors.push(r.change);
-    }
-
-    values[0] = Array.from(groupAgg.values()).reduce((s,x)=>s+x.value,0);
-    return {ids, labels, parents, values, colors};
   }
+
+  for (const [gname, g] of groupAgg.entries()) {
+    const gid = `g|${gname}`;
+    ids.push(gid);
+    labels.push(gname);
+    parents.push(ROOT_ID);
+    values.push(g.value);
+    colors.push(g.value ? (g.wchg / g.value) : 0);
+    customdata.push(null);
+  }
+
+  if (mode !== 'none') {
+    for (const s of subAgg.values()) {
+      const sid = `s|${s.group}|${s.sub}`;
+      ids.push(sid);
+      labels.push(s.sub);
+      parents.push(`g|${s.group}`);
+      values.push(s.value);
+      colors.push(s.value ? (s.wchg / s.value) : 0);
+      customdata.push(null);
+    }
+  }
+
+  for (const r of rows) {
+    const parentId = (mode === 'none')
+      ? `g|${r.group}`
+      : `s|${r.group}|${r.sub || '未分類'}`;
+
+    const lid = `l|${r.group}|${r.sub || ''}|${r.symbol}`;
+    ids.push(lid);
+
+    // 葉節點 label = symbol + 換行 + 漲跌幅（1位小數）
+    labels.push(`${r.symbol}<br>${fmtPct(r.change)}`);
+
+    parents.push(parentId);
+    values.push(r.value);
+    colors.push(r.change);
+
+    // ★把股票代碼塞進 customdata（之後點擊會用到）
+    customdata.push(r.code || '');
+  }
+
+  values[0] = Array.from(groupAgg.values()).reduce((s,x)=>s+x.value,0);
+  return {ids, labels, parents, values, colors, customdata};
+}
 
   function render(rawRows) {
     const mode = $mode.value;
@@ -405,38 +427,68 @@
     const rows = normalizeRows(rawRows, mode, horizon);
     lastRows = rows;
 
-    const {ids, labels, parents, values, colors} = buildTreemap(rows, mode);
+    const {ids, labels, parents, values, colors, customdata} = buildTreemap(rows, mode);
 
-    const data = [{
-      type: 'treemap',
-      ids,
-      labels,
-      parents,
-      values,
-      branchvalues: 'total',
-      textinfo: 'label',
-      marker: {
-        colors,
-        colorscale: [
-          [0,'#1a9641'],
-          [0.5,'#f3f4f6'],
-          [1,'#d7191c']
-        ],
-        cmid: 0,
-        line: { width: 1, color: '#d1d5db' }
-      },
-      hovertemplate:
-        `<b>%{label}</b><br>` +
-        `上層：%{parent}<br>` +
-        `量（${horizonLabel(horizon)}）：%{value}<br>` +
-        `變動（${horizonLabel(horizon)}）：%{color:.2f}<extra></extra>`
-    }];
+const data = [{
+  type: 'treemap',
+  ids,
+  labels,
+  parents,
+  values,
+  customdata, // ★加這行
+  branchvalues: 'total',
+  textinfo: 'label',
+  marker: {
+    colors,
+    colorscale: [
+      [0,'#1a9641'],
+      [0.5,'#f3f4f6'],
+      [1,'#d7191c']
+    ],
+    cmid: 0,
+    line: { width: 1, color: '#d1d5db' }
+  },
+  hovertemplate:
+    `<b>%{label}</b><br>` +
+    `上層：%{parent}<br>` +
+    `量（${horizonLabel(horizon)}）：%{value}<br>` +
+    `變動（${horizonLabel(horizon)}）：%{color:.2f}<extra></extra>`
+}];
 
-    Plotly.newPlot('chart', data, {margin:{l:10,r:10,t:10,b:10}}, {responsive:true, displaylogo:false});
-    setMsg(`已更新熱力圖（期間：${horizonLabel(horizon)}；模式：${mode}）。`, true);
-    $btnCopy.disabled = true;
+Plotly.newPlot('chart', data, {margin:{l:10,r:10,t:30,b:10}}, {responsive:true, displaylogo:false})
+  .then(() => {
+    const chartDiv = document.getElementById('chart');
+    if (!chartDiv) return;
 
-    showDataUpdatedAt();
+    // 避免重複綁定（每次 render 都會 newPlot）
+    if (typeof chartDiv.removeAllListeners === 'function') {
+      chartDiv.removeAllListeners('plotly_treemapclick');
+    }
+
+    chartDiv.on('plotly_treemapclick', (e) => {
+      const pt = e?.points?.[0];
+      const id = String(pt?.id || '');
+
+      // ★只有葉節點（股票）才處理；阻止 zoom
+      if (!id.startsWith('l|')) return;
+
+      const code = String(pt?.customdata || '').trim();
+      if (!code) {
+        setMsg('找不到股票代碼（請確認 CSV 有 stock_code 欄位且不為空）。', false);
+        return false;
+      }
+
+      const url = `https://www.fbs.com.tw/MKT/Index?name=%EF%BC%AB%E7%B7%9A%E5%9C%96&stock=${encodeURIComponent(code)}`;
+      window.open(url, '_blank', 'noopener,noreferrer');
+
+      return false; // ★阻止 Plotly 預設 zoom（避免點到底層變空白）
+    });
+  });
+
+setMsg(`已更新熱力圖（期間：${horizonLabel(horizon)}；模式：${mode}）。`, true);
+$btnCopy.disabled = true;
+
+showDataUpdatedAt();
   }
 
   function loadCSVText(text) {
@@ -610,3 +662,4 @@
 </script>
 </body>
 </html>
+
